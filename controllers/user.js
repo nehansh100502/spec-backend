@@ -1,22 +1,31 @@
 const { body, validationResult } = require('express-validator');
 const User = require('../models/user');
 const Session = require('../models/session');
+const Order = require('../models/order');
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const path = require('path');
+const fs = require('fs');
 const { sendEmail } = require('../utils/sendEmail');
 
 // Function to generate JWT token
 const generateToken = (userId, username) => {
-    return jwt.sign({ userId, username }, process.env.JWT_SECRET, { expiresIn: '1d' });
+    return jwt.sign({ userId, username }, process.env.JWT_SECRET, { expiresIn: '7d' });
+};
+
+// Helper function to capitalize the first letter of each word
+const capitalizeWords = (str) => {
+    return str.replace(/\b\w/g, char => char.toUpperCase());
 };
 
 // Signup Function with Validation Middleware
 exports.Signup = [
     // Validation rules
     body('username')
-        .notEmpty().withMessage('Username is required')
-        .isLength({ min: 3 }).withMessage('Username must be at least 3 characters long')
-        .custom(value => /^[A-Z][a-zA-Z0-9]+$/.test(value)).withMessage('Username must start with a capital letter and contain only letters and numbers'),
+    .notEmpty().withMessage('Username is required')
+    .isLength({ min: 3, max: 30 }).withMessage('Username must be between 3 and 30 characters long')
+    .matches(/^[A-Za-z ]+$/).withMessage('Username can only contain letters and spaces'),
+
     body('email')
         .isEmail().withMessage('Please enter a valid email address'),
     body('password')
@@ -27,6 +36,7 @@ exports.Signup = [
         .notEmpty().withMessage('Phone number is required')
         .matches(/^[0-9]{10}$/).withMessage('Phone number must be 10 digits'),
 
+   
     // Controller logic
     async (req, res) => {
         const errors = validationResult(req);
@@ -34,7 +44,7 @@ exports.Signup = [
             return res.status(400).json({ errors: errors.array() });
         }
 
-        const { username, email, password, phone } = req.body;
+        let { username, email, password, phone } = req.body;
 
         try {
             console.log('Signup request body:', req.body);  // Debugging
@@ -51,6 +61,9 @@ exports.Signup = [
                 return res.status(400).json({ message: 'Username already exists' });
             }
 
+            // Capitalize the first letter of each word in the username
+            username = capitalizeWords(username);
+
             // Hash the password
             const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -61,20 +74,12 @@ exports.Signup = [
             // Generate a token
             const token = generateToken(newUser._id, username);
 
-            // Save user information and token in session
-            req.session.user = {
-                userId: newUser._id,
-                username: newUser.username,
-                email: newUser.email,
-                token: token,
-            };
-
-            // Send response with redirection URL
+            // Send response with token and user information
             res.status(201).json({ 
-                message: 'User created and session started', 
+                message: 'User created successfully', 
                 user: newUser, 
                 token,
-                redirectUrl: '/'  // Home page
+                redirectUrl: '/'  // Home page or wherever you want to redirect
             });
         } catch (error) {
             console.error('Signup error:', error);  // Debugging
@@ -220,29 +225,279 @@ exports.ResetPassword = async (req, res) => {
     }
 };
 
+
 exports.GetUserProfile = async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ error: 'Unauthorized: No token provided' });
+        const user = await User.findById(req.user._id).select('username email');
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+       
+        res.json({ 
+            success: true, 
+            user: {
+                _id: user._id,
+                username: user.username,
+                email: user.email
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching user profile:', error);
+        res.status(500).json({ success: false, message: 'Server Error' });
+    }
+};
+
+
+// exports.GetUserProfile = async (req, res) => {
+//     try {
+//         const user = await User.findById(req.user._id).select('username email');
+//         if (!user) {
+//             return res.status(404).json({ success: false, message: 'User not found' });
+//         }
+
+//         res.json({ 
+//             success: true, 
+//             user: {
+//                 _id: user._id,
+//                 username: user.username,
+//                 email: user.email
+//             }
+//         });
+//     } catch (error) {
+//         console.error('Error fetching user profile:', error);
+//         res.status(500).json({ success: false, message: 'Server Error' });
+//     }
+// };
+
+
+exports.GetUserDetails = async (req, res) => {
+    try {
+        // Extract the user ID from the authenticated user
+        const userId = req.user ? req.user._id : null;
+
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized: No user ID available' });
         }
 
-        const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
-        // Ensure token contains expected payload
-        if (!decoded || !decoded._id) {
-            return res.status(401).json({ error: 'Unauthorized: Invalid token' });
-        }
+        // Fetch user data based on the ID
+        const user = await User.findById(userId).select('username email');
 
-        const user = await User.findById(decoded._id).select('username email'); // Select both username and email
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        res.json({ username: user.username, email: user.email }); // Include email in the response
+        // Fetch orders associated with the user
+        const orders = await Order.find({ userId: userId }).select('orderDetails createdAt'); // Modify this select statement based on your Order schema
+
+        // Return the user profile along with orders
+        res.json({
+            success: true,
+            user: {
+                _id: user._id, // User ID
+                username: user.username, // Username
+                email: user.email, // Email
+                orders: orders, // Orders created by the user
+            },
+        });
     } catch (error) {
-        console.error('Error fetching user profile:', error.message);
-        res.status(500).json({ error: 'Server error' });
+        console.error('Error fetching user details:', error.message);
+        res.status(500).json({ success: false, message: 'Server Error' });
     }
 };
+
+
+
+// exports.GetUserDetails = async (req, res) => {
+//     try {
+//         // Ensure the user ID is extracted correctly
+//         const userId = req.user ? req.user._id : null;
+
+//         if (!userId) {
+//             return res.status(401).json({ error: 'Unauthorized: No user ID available' });
+//         }
+
+//         // Fetch user data (username, email)
+//         const user = await User.findById(userId).select('username email');
+//         if (!user) {
+//             return res.status(404).json({ error: 'User not found' });
+//         }
+
+//         // Fetch user's orders (adjust based on your schema)
+//         const orders = await Order.find({ userId: userId })
+//                                   .select('orderDetails createdAt')
+//                                   .lean();  // Optional: converts the Mongoose documents to plain objects
+
+//         // Return the user's profile along with their orders
+//         res.json({
+//             success: true,
+//             user: {
+//                 _id: user._id,
+//                 username: user.username,
+//                 email: user.email,
+//                 orders: orders,  // Attach the orders here
+//             },
+//         });
+//     } catch (error) {
+//         console.error('Error fetching user details:', error.message);
+//         res.status(500).json({ success: false, message: 'Server Error' });
+//     }
+// };
+
+// Delete User Account Function
+exports.DeleteUserAccount = async (req, res) => {
+    try {
+        // Log the request for debugging
+        console.log('Delete Account request for user:', req.user._id);
+
+        // Find the user by ID and delete them
+        const deletedUser = await User.findByIdAndDelete(req.user._id);
+
+        // Check if the user was found and deleted
+        if (!deletedUser) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Optionally, you could delete any related data, such as sessions or orders here
+
+        res.status(200).json({ message: 'Account deleted successfully' });
+    } catch (error) {
+        console.error('Delete Account error:', error);
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+}; 
+// Controller for updating or creating user profile
+exports.updateProfile = async (req, res) => {
+    const { name, dob } = req.body;
+    let profilePicPath = '';
+  
+    // If profilePic exists, save it to the filesystem or cloud storage
+    if (req.file) {
+      // Store profile picture in 'uploads' folder
+      const uploadDir = path.join(__dirname, '..', 'uploads');
+      
+      // Ensure the uploads directory exists
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      
+      // Save the file to the 'uploads' directory
+      profilePicPath = path.join(uploadDir, `${Date.now()}-${req.file.originalname}`);
+      fs.writeFileSync(profilePicPath, req.file.buffer);
+    }
+  
+    try {
+      // Check if user exists and update the profile, otherwise create a new one
+      let user = await User.findOneAndUpdate(
+        { name }, // Find by name or other unique identifier like `userId`
+        { name, dob, profilePic: profilePicPath },
+        { new: true, upsert: true } // Create new if not exists
+      );
+  
+      res.status(200).json({
+        message: 'Profile updated successfully!',
+        user,
+      });
+    } catch (error) {
+      res.status(500).json({ message: 'Error updating profile', error });
+    }
+  };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// exports.GetUserProfile = async (req, res) => {
+//     try {
+//         const authHeader = req.headers.authorization;
+//         if (!authHeader || !authHeader.startsWith('Bearer ')) {
+//             return res.status(401).json({ error: 'Unauthorized: No token provided' });
+//         }
+
+//         const token = authHeader.split(' ')[1];
+//         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
+//         // Ensure token contains expected payload
+//         if (!decoded || !decoded._id) {
+//             return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+//         }
+
+//         const user = await User.findById(decoded._id).select('username email'); // Select both username and email
+//         if (!user) {
+//             return res.status(404).json({ error: 'User not found' });
+//         }
+
+//         res.json({ username: user.username, email: user.email }); // Include email in the response
+//     } catch (error) {
+//         console.error('Error fetching user profile:', error.message);
+//         res.status(500).json({ error: 'Server error' });
+//     }
+// };
+
+
+// exports.GetUserProfile = async (req, res) => {
+//     try {
+//         // First, try to get the userId from req.user if it's populated by authMiddleware
+//         let userId = req.user ? req.user.id : null;
+
+//         // Debugging: Log if userId from req.user is available
+//         console.log('req.user.id:', req.user?.id);
+
+//         // If req.user is not populated, fallback to checking the Authorization header
+//         if (!userId) {
+//             const authHeader = req.headers.authorization;
+//             if (!authHeader || !authHeader.startsWith('Bearer ')) {
+//                 return res.status(401).json({ error: 'Unauthorized: No token provided' });
+//             }
+
+//             const token = authHeader.split(' ')[1];
+//             const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+//             // Ensure the token contains a valid user ID
+//             if (!decoded || !decoded._id) {
+//                 return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+//             }
+
+//             userId = decoded._id; // Use the _id from the decoded token
+
+//             // Debugging: Log the decoded user ID from the token
+//             console.log('Decoded User ID from token:', decoded._id);
+//         }
+
+//         // Fetch user data based on the ID from either the token or req.user
+//         const user = await User.findById(userId).select('username email');
+
+//         // Debugging: Log the fetched user data
+//         console.log('Fetched User Data:', user);
+
+//         if (!user) {
+//             return res.status(404).json({ error: 'User not found' });
+//         }
+
+//         // Return the user profile, including username and email
+//         res.json({
+//             success: true,
+//             user: {
+//                 _id: user._id,       // User ID
+//                 username: user.username, // Username
+//                 email: user.email,   // Email
+//             },
+//         });
+
+//     } catch (error) {
+//         console.error('Error fetching user profile:', error.message);
+//         res.status(500).json({ success: false, message: 'Server Error' });
+//     }
+// };
+
+

@@ -8,6 +8,19 @@ const userSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    name: {
+        type: String,
+      
+        unique: true
+      },
+      dob: {
+        type: Date,
+       
+      },
+      profilePic: {
+        type: String, // File path or URL for the profile picture
+        default: ''
+      },
     email: {
         type: String,
         required: true,
@@ -31,6 +44,19 @@ const userSchema = new mongoose.Schema({
         token: {
             type: String,
             required: true
+        }
+    }],
+    profile: [{
+        name: {
+            type: String,
+            unique: true
+        },
+        dob: {
+            type: Date
+        },
+        profilePic: {
+            type: String, // File path or URL for the profile picture
+            default: ''
         }
     }]
 });
